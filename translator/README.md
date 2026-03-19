@@ -4,21 +4,17 @@ Video Voice Translator Recorder is a macOS meeting companion that captures syste
 
 ## Demo Preview
 
-Add product screenshots or short demo clips here when available.
+### Live View
 
-```text
-README assets suggestion:
-- docs/images/live-view.png
-- docs/images/summary-editor.png
-- docs/images/answer-panel.png
-```
-
-Example section layout you can enable later:
-
-```md
 ![Live View](docs/images/live-view.png)
+
+### Summary Editor
+
 ![Summary Editor](docs/images/summary-editor.png)
-```
+
+### Answer Panel
+
+![Answer Panel](docs/images/answer-panel.png)
 
 ## Highlights
 
