@@ -14,6 +14,36 @@ public enum VVTRTextHeuristics {
     return cjk >= max(2, letters / 3)
   }
 
+  public static func looksMostlyLatin(_ text: String) -> Bool {
+    let scalars = text.unicodeScalars
+    guard !scalars.isEmpty else { return false }
+    var latinLetters = 0
+    var cjk = 0
+    for scalar in scalars {
+      if (0x4E00...0x9FFF).contains(Int(scalar.value)) {
+        cjk += 1
+        continue
+      }
+      if CharacterSet.letters.contains(scalar), scalar.properties.isAlphabetic {
+        let value = Int(scalar.value)
+        if (0x41...0x5A).contains(value) || (0x61...0x7A).contains(value) {
+          latinLetters += 1
+        }
+      }
+    }
+    return latinLetters >= max(4, cjk * 2)
+  }
+
+  public static func isLikelyChinese(_ text: String, detectedLanguage: String?) -> Bool {
+    if looksLikeChinese(text) { return true }
+    guard let detectedLanguage, !detectedLanguage.isEmpty else { return false }
+    let normalized = detectedLanguage.lowercased()
+    if normalized.hasPrefix("zh") {
+      return !looksMostlyLatin(text)
+    }
+    return false
+  }
+
   public static func looksLikeQuestion(_ text: String) -> Bool {
     let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !t.isEmpty else { return false }
@@ -26,4 +56,3 @@ public enum VVTRTextHeuristics {
     return false
   }
 }
-

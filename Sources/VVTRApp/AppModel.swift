@@ -136,10 +136,6 @@ final class AppModel: ObservableObject {
               self.summaryDraft = outputText
               self.isSummaryEditorPresented = true
             }
-            if kind == .summary {
-              self.summaryDraft = outputText
-              self.isSummaryEditorPresented = true
-            }
           }
         })
 
@@ -149,7 +145,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             if let raw, self.handleASRErrorIfNeeded(raw: raw, sessionId: sessionId) { return }
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            let isZh = VVTRTextHeuristics.looksLikeChinese(text) || (lang?.lowercased().hasPrefix("zh") ?? false)
+            let isZh = VVTRTextHeuristics.isLikelyChinese(text, detectedLanguage: lang)
             let isQ = VVTRTextHeuristics.looksLikeQuestion(text)
             let intent: VVTRIntent = isQ ? .question : .statement
 
@@ -177,10 +173,10 @@ final class AppModel: ObservableObject {
               VVTRDatabase.shared.insertOutput(out)
             }
 
-            if !isZh && intent == .statement {
+            if !isZh {
               Task { [llmPipeline] in
                 if let llmPipeline {
-                  await llmPipeline.handle(text: text, isChinese: isZh, intent: intent)
+                  await llmPipeline.handle(text: text, isChinese: false, intent: .statement)
                 }
               }
             }
@@ -204,6 +200,10 @@ final class AppModel: ObservableObject {
             )
             self.outputs.append(out)
             VVTRDatabase.shared.insertOutput(out)
+            if kind == .summary {
+              self.summaryDraft = outputText
+              self.isSummaryEditorPresented = true
+            }
           }
         })
         let llmPipeline = llm
@@ -213,7 +213,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             if let raw, self.handleASRErrorIfNeeded(raw: raw, sessionId: sessionId) { return }
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            let isZh = VVTRTextHeuristics.looksLikeChinese(text) || (lang?.lowercased().hasPrefix("zh") ?? false)
+            let isZh = VVTRTextHeuristics.isLikelyChinese(text, detectedLanguage: lang)
             let isQ = VVTRTextHeuristics.looksLikeQuestion(text)
             let intent: VVTRIntent = isQ ? .question : .statement
 
@@ -241,10 +241,10 @@ final class AppModel: ObservableObject {
               VVTRDatabase.shared.insertOutput(out)
             }
 
-            if !isZh && intent == .statement {
+            if !isZh {
               Task { [llmPipeline] in
                 if let llmPipeline {
-                  await llmPipeline.handle(text: text, isChinese: isZh, intent: intent)
+                  await llmPipeline.handle(text: text, isChinese: false, intent: .statement)
                 }
               }
             }
@@ -490,7 +490,7 @@ final class AppModel: ObservableObject {
 
     for segment in targets {
       let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
-      let isChinese = VVTRTextHeuristics.looksLikeChinese(text) || (segment.language?.lowercased().hasPrefix("zh") ?? false)
+      let isChinese = VVTRTextHeuristics.isLikelyChinese(text, detectedLanguage: segment.language)
       guard !text.isEmpty else { continue }
       Task {
         await llmPipeline.handle(text: text, isChinese: isChinese, intent: .question)
@@ -628,4 +628,3 @@ final class AppModel: ObservableObject {
     return true
   }
 }
-

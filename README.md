@@ -1,59 +1,59 @@
 # Video Voice Translator Recorder
 
-一个 macOS 桌面工具：同时监听系统音频和麦克风，把语音转成文字，并在界面中按区域展示原文、中文内容、问题回答和会后总结。
+A macOS desktop app that listens to both system audio and microphone input, turns speech into text, and presents the original transcript, Chinese content, Q&A, and post-meeting summary in separate areas of the UI.
 
-## 当前功能
+## Current Features
 
-- 采集系统音频和麦克风音频
-- 云端语音转写（OpenAI / Gemini）
-- 中文内容区展示中文原文或外语翻译结果
-- 手动勾选问题，再触发回答
-- 回答区同时显示中文回答和英文翻译
-- 停止采集后生成会议总结
-- 总结弹窗支持编辑，并可导出 PDF
-- 会话持久化到本地 SQLite
-- 侧边栏支持切换和删除会话
+- Capture system audio and microphone audio
+- Cloud-based speech transcription with OpenAI or Gemini
+- Show either native Chinese text or translated Chinese content in the Chinese content panel
+- Manually select questions before triggering answers
+- Display both Chinese answers and English translations in the answer panel
+- Generate a meeting summary after capture stops
+- Edit the summary in a modal and export it as PDF
+- Persist sessions locally in SQLite
+- Switch and delete sessions from the sidebar
 
-## 运行方式
+## Run
 
-1. 用 Xcode 打开本目录中的 Swift Package。
-2. 选择 scheme `VVTRApp`。
-3. 直接 Run。
+1. Open the Swift package in this directory with Xcode.
+2. Select the `VVTRApp` scheme.
+3. Run the app.
 
-## 权限
+## Permissions
 
-应用运行时可能会涉及以下权限：
+The app may require the following permissions:
 
-- 麦克风：采集麦克风音频
-- 屏幕与系统音频录制：采集系统音频
+- Microphone: capture microphone audio
+- Screen and System Audio Recording: capture system audio
 
-应用现在会先检查麦克风权限状态，只有在系统尚未决定时才请求授权。
+The app checks microphone permission status before requesting access, and only prompts when the system has not made a decision yet.
 
-## 云端配置
+## Cloud Configuration
 
-在应用的“设置”页中填写：
+Fill in the following fields on the app's Settings page:
 
-- Provider：`OpenAI / 兼容接口` 或 `Gemini`
+- Provider: `OpenAI / Compatible Endpoint` or `Gemini`
 - API Key
 - Base URL
 - Model
 
-说明：
+Notes:
 
-- OpenAI 路径更适合当前项目的语音转写实现
-- Gemini 路径对配额和模型支持更敏感
-- 配置文件保存在本机 `Application Support`，不会写入仓库
+- The OpenAI path is currently the better fit for this project's transcription flow
+- The Gemini path is more sensitive to quota limits and model support
+- Configuration is stored locally under `Application Support` and is not committed to the repository
 
-## 数据存储
+## Data Storage
 
-本地数据使用 SQLite 保存，包括：
+Local data is stored in SQLite, including:
 
-- 会话
-- 转写片段
-- 中文内容 / 回答 / 总结等输出
+- Sessions
+- Transcript segments
+- Outputs such as Chinese content, answers, and summaries
 
-## 已知说明
+## Known Notes
 
-- 系统音频采集依赖 macOS 的屏幕与系统音频录制授权；如果你刚刚修改了该权限，通常需要完全退出应用后重新打开
-- 当前逐字显示是界面动画，不是流式 ASR token 级实时返回
-- 会后总结在停止采集后生成，不是边录边滚动总结
+- System audio capture depends on macOS screen and system audio recording permission. If you just changed that permission, you usually need to fully quit and reopen the app.
+- The current character-by-character display is a UI animation, not true token-level streaming ASR output.
+- The meeting summary is generated after capture stops, not continuously while recording.
