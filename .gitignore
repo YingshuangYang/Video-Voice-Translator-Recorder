@@ -1,0 +1,20 @@
+.DS_Store
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+*.xcodeproj
+
+# App data (if ever stored locally in workspace)
+**/Application Support/**
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+**/settings.json
+
