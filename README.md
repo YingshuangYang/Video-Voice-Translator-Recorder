@@ -12,11 +12,11 @@ Example section layout you can enable later:
 
 ### Summary Editor
 
-![Summary Editor](docs/images/summary-editor.png)
+![Summary Editor](translator/docs/images/summary-editor.png)
 
 ### Answer Panel
 
-![Answer Panel](docs/images/answer-panel.png)
+![Answer Panel](translator/docs/images/answer-panel.png)
 
 
 ## Highlights
