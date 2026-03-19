@@ -8,7 +8,7 @@ Example section layout you can enable later:
 
 ### Live View
 
-![Live View](docs/images/live-view.png)
+![Live View](translator/docs/images/live-view.png)
 
 ### Summary Editor
 
