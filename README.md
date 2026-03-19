@@ -16,8 +16,8 @@ README assets suggestion:
 Example section layout you can enable later:
 
 ```md
-[Live View](docs/images/live-view.png)
-[Summary Editor](docs/images/summary-editor.png)
+![Live View](docs/images/live-view.png)
+![Summary Editor](docs/images/summary-editor.png)
 ```
 
 ## Highlights
