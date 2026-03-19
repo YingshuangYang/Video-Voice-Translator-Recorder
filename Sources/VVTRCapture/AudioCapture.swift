@@ -7,15 +7,18 @@ public final class VVTRAudioCaptureManager: NSObject, @unchecked Sendable {
   public struct Callbacks: Sendable {
     public var onSystemPCMBuffer: @Sendable (_ buffer: AVAudioPCMBuffer, _ at: Date) -> Void
     public var onMicPCMBuffer: @Sendable (_ buffer: AVAudioPCMBuffer, _ at: Date) -> Void
+    public var onWarning: @Sendable (_ error: Error) -> Void
     public var onError: @Sendable (_ error: Error) -> Void
 
     public init(
       onSystemPCMBuffer: @escaping @Sendable (_ buffer: AVAudioPCMBuffer, _ at: Date) -> Void,
       onMicPCMBuffer: @escaping @Sendable (_ buffer: AVAudioPCMBuffer, _ at: Date) -> Void,
+      onWarning: @escaping @Sendable (_ error: Error) -> Void,
       onError: @escaping @Sendable (_ error: Error) -> Void
     ) {
       self.onSystemPCMBuffer = onSystemPCMBuffer
       self.onMicPCMBuffer = onMicPCMBuffer
+      self.onWarning = onWarning
       self.onError = onError
     }
   }
@@ -34,20 +37,33 @@ public final class VVTRAudioCaptureManager: NSObject, @unchecked Sendable {
   }
 
   public func start(systemAudio: Bool = true, microphone: Bool = true) async {
-    do {
-      if systemAudio {
+    var startedAtLeastOneSource = false
+
+    if systemAudio {
+      do {
         let sys = try await VVTRSystemAudioCapture { [callbacks] buffer, at in
           callbacks.onSystemPCMBuffer(buffer, at)
         }
         self.systemCapture = sys
         try await sys.start()
+        startedAtLeastOneSource = true
+      } catch {
+        callbacks.onWarning(error)
       }
+    }
 
-      if microphone {
+    if microphone {
+      do {
         try startMicrophone()
+        startedAtLeastOneSource = true
+      } catch {
+        callbacks.onError(error)
+        return
       }
-    } catch {
-      callbacks.onError(error)
+    }
+
+    if !startedAtLeastOneSource {
+      callbacks.onError(VVTRCaptureError.noAudioSourceAvailable)
     }
   }
 
@@ -79,12 +95,45 @@ public final class VVTRAudioCaptureManager: NSObject, @unchecked Sendable {
   }
 }
 
+public enum VVTRMicrophoneAuthorizationState: Sendable {
+  case authorized
+  case denied
+  case restricted
+  case notDetermined
+}
+
 public enum VVTRPermissions {
+  public static func microphoneAuthorizationState() -> VVTRMicrophoneAuthorizationState {
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .authorized:
+      return .authorized
+    case .denied:
+      return .denied
+    case .restricted:
+      return .restricted
+    case .notDetermined:
+      return .notDetermined
+    @unknown default:
+      return .restricted
+    }
+  }
+
   public static func requestMicrophoneAccess() async -> Bool {
     await withCheckedContinuation { cont in
       AVCaptureDevice.requestAccess(for: .audio) { granted in
         cont.resume(returning: granted)
       }
+    }
+  }
+}
+
+public enum VVTRCaptureError: Error, LocalizedError {
+  case noAudioSourceAvailable
+
+  public var errorDescription: String? {
+    switch self {
+    case .noAudioSourceAvailable:
+      return "没有可用的音频输入源，请检查麦克风和系统音频录制权限。"
     }
   }
 }

@@ -29,7 +29,14 @@ let package = Package(
     ),
     .target(name: "VVTRCore", path: "Sources/VVTRCore"),
     .target(name: "VVTRCapture", dependencies: ["VVTRCore"], path: "Sources/VVTRCapture"),
-    .target(name: "VVTRCloud", dependencies: ["VVTRCore"], path: "Sources/VVTRCloud"),
+    .target(
+      name: "VVTRCloud",
+      dependencies: [
+        "VVTRCore",
+        "VVTRCapture",
+      ],
+      path: "Sources/VVTRCloud"
+    ),
     .target(
       name: "VVTRStorage",
       dependencies: [

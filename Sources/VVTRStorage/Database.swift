@@ -78,6 +78,22 @@ public final class VVTRDatabase: @unchecked Sendable {
     try db.run(outputs.createIndex(createdAt, ifNotExists: true))
   }
 
+  public func listSessions(limit: Int = 200) -> [VVTRSession] {
+    do {
+      let q = sessions.order(createdAt.desc).limit(limit)
+      return try db.prepare(q).compactMap { row in
+        guard let sid = UUID(uuidString: row[id]) else { return nil }
+        return VVTRSession(
+          id: sid,
+          createdAt: Date(timeIntervalSince1970: row[createdAt]),
+          title: row[title]
+        )
+      }
+    } catch {
+      return []
+    }
+  }
+
   public func upsertSession(_ s: VVTRSession) {
     let row = sessions.filter(id == s.id.uuidString)
     do {
@@ -126,6 +142,55 @@ public final class VVTRDatabase: @unchecked Sendable {
         outputText <- out.outputText,
         jsonPayload <- out.jsonPayload
       ))
+    } catch {
+      // ignore
+    }
+  }
+
+  public func listSegments(sessionId targetSessionId: UUID) -> [VVTRTranscriptSegment] {
+    do {
+      let q = segments
+        .filter(sessionId == targetSessionId.uuidString)
+        .order(createdAt.asc)
+      return try db.prepare(q).compactMap { row in
+        guard let sid = UUID(uuidString: row[sessionId]),
+              let segId = UUID(uuidString: row[id]) else { return nil }
+        return VVTRTranscriptSegment(
+          id: segId,
+          sessionId: sid,
+          createdAt: Date(timeIntervalSince1970: row[createdAt]),
+          startTime: row[Expression<Double?>("start_time")],
+          endTime: row[Expression<Double?>("end_time")],
+          source: VVTRAudioSource(rawValue: row[source]) ?? .mixed,
+          language: row[language],
+          text: row[text]
+        )
+      }
+    } catch {
+      return []
+    }
+  }
+
+  public func listOutputs(sessionId targetSessionId: UUID, limit: Int = 500) -> [VVTROutput] {
+    do {
+      let q = outputs
+        .filter(sessionId == targetSessionId.uuidString)
+        .order(createdAt.asc)
+        .limit(limit)
+      return try db.prepare(q).compactMap { row in decodeOutput(row) }
+    } catch {
+      return []
+    }
+  }
+
+  public func deleteSession(id targetSessionId: UUID) {
+    do {
+      let sid = targetSessionId.uuidString
+      try db.transaction {
+        try db.run(outputs.filter(sessionId == sid).delete())
+        try db.run(segments.filter(sessionId == sid).delete())
+        try db.run(sessions.filter(id == sid).delete())
+      }
     } catch {
       // ignore
     }

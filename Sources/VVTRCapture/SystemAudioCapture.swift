@@ -19,10 +19,16 @@ final class VVTRSystemAudioCapture: NSObject {
   }
 
   func start() async throws {
-    // Request Screen Recording permission if needed.
-    _ = VVTRScreenCaptureAccess.requestIfNeeded()
+    guard VVTRScreenCaptureAccess.requestIfNeeded() else {
+      throw VVTRSystemAudioCaptureError.permissionDenied
+    }
 
-    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    let content: SCShareableContent
+    do {
+      content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    } catch {
+      throw VVTRSystemAudioCaptureError.wrap(error)
+    }
     guard let display = content.displays.first else {
       throw NSError(domain: "VVTRCapture", code: 1, userInfo: [NSLocalizedDescriptionKey: "未找到可用显示器用于系统音频捕获。"])
     }
@@ -130,6 +136,28 @@ private enum VVTRAudioBufferConverter {
     }
 
     return nil
+  }
+}
+
+private enum VVTRSystemAudioCaptureError: Error, LocalizedError {
+  case permissionDenied
+  case other(String)
+
+  static func wrap(_ error: Error) -> VVTRSystemAudioCaptureError {
+    let description = error.localizedDescription
+    if description.localizedCaseInsensitiveContains("declined tccs") {
+      return .permissionDenied
+    }
+    return .other(description)
+  }
+
+  var errorDescription: String? {
+    switch self {
+    case .permissionDenied:
+      return "未获得屏幕与系统音频录制权限。请在系统设置中允许后重试；如果刚刚才授权，先完全退出应用再重新打开。"
+    case let .other(message):
+      return message
+    }
   }
 }
 

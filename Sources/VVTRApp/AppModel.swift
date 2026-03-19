@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import VVTRCore
@@ -12,16 +13,22 @@ final class AppModel: ObservableObject {
   @Published var sessions: [VVTRSession] = []
   @Published var segments: [VVTRTranscriptSegment] = []
   @Published var outputs: [VVTROutput] = []
+  @Published var selectedQuestionSegmentIDs: Set<UUID> = []
+  @Published var summaryDraft: String = ""
+  @Published var isSummaryEditorPresented: Bool = false
   @Published var isCapturing: Bool = false
   @Published var lastSystemAudioAt: Date?
   @Published var lastMicAudioAt: Date?
+  @Published var systemAudioStatusMessage: String?
 
   private let settingsStore: VVTRSettingsStore
   private var capture: VVTRAudioCaptureManager?
   private var systemChunker: VVTRChunker?
   private var micChunker: VVTRChunker?
   private var asr: VVTRASRPipeline?
-  private var llm: VVTRLLMPipeline?
+  private var llm: (any VVTRLLMHandling)?
+
+  private static let asrErrorPrefix = "ASR_ERROR: "
 
   init() {
     self.settingsStore = (try? VVTRSettingsStore()) ?? {
@@ -33,6 +40,11 @@ final class AppModel: ObservableObject {
       guard let self else { return }
       let loaded = await settingsStore.load()
       self.settings = loaded
+      let savedSessions = VVTRDatabase.shared.listSessions(limit: 500)
+      self.sessions = savedSessions
+      if let first = savedSessions.first {
+        self.loadSession(first.id)
+      }
     }
   }
 
@@ -49,32 +61,62 @@ final class AppModel: ObservableObject {
     sessions.insert(session, at: 0)
     segments.removeAll()
     outputs.removeAll()
+    selectedQuestionSegmentIDs.removeAll()
     VVTRDatabase.shared.upsertSession(session)
+  }
+
+  func loadSession(_ sessionID: UUID) {
+    guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
+    currentSession = session
+    segments = VVTRDatabase.shared.listSegments(sessionId: sessionID)
+    outputs = VVTRDatabase.shared.listOutputs(sessionId: sessionID)
+    selectedQuestionSegmentIDs.removeAll()
+    summaryDraft = outputs.last(where: { $0.kind == .summary })?.outputText ?? ""
+    isSummaryEditorPresented = false
+  }
+
+  func deleteSessions(at offsets: IndexSet) {
+    let deleting = offsets.map { sessions[$0] }
+    let deletingIDs = Set(deleting.map(\.id))
+
+    if deletingIDs.contains(currentSession?.id ?? UUID()) {
+      stopCaptureIfNeeded()
+    }
+
+    for session in deleting {
+      VVTRDatabase.shared.deleteSession(id: session.id)
+    }
+
+    sessions.remove(atOffsets: offsets)
+
+    if let current = currentSession, deletingIDs.contains(current.id) {
+      if let replacement = sessions.first {
+        loadSession(replacement.id)
+      } else {
+        currentSession = nil
+        segments.removeAll()
+        outputs.removeAll()
+        selectedQuestionSegmentIDs.removeAll()
+      }
+    }
   }
 
   func startCapture() {
     guard capture == nil else { return }
     if currentSession == nil { startNewSession() }
     isCapturing = true
+    systemAudioStatusMessage = nil
 
     if #available(macOS 13.0, *) {
       let sessionId = currentSession?.id ?? UUID()
-      let chunkConfig = VVTRChunker.Config(chunkSeconds: settings.chunkSeconds, overlapSeconds: settings.overlapSeconds)
-      let appendInfo: @Sendable (String) -> Void = { [weak self] msg in
-        Task { @MainActor in
-          self?.outputs.append(
-            VVTROutput(
-              sessionId: sessionId,
-              kind: .summary,
-              intent: .statement,
-              sourceText: "",
-              outputText: msg
-            )
-          )
-        }
-      }
+      let chunkConfig = VVTRChunker.Config(
+        chunkSeconds: max(settings.chunkSeconds, 20),
+        overlapSeconds: settings.overlapSeconds
+      )
 
-      if !settings.openAIAPIKey.isEmpty {
+      switch settings.provider {
+      case .openai:
+        guard !settings.openAIAPIKey.isEmpty else { break }
         let baseURL = URL(string: settings.openAIBaseURL) ?? URL(string: "https://api.openai.com/v1")!
         let client = VVTROpenAIClient(config: .init(apiKey: settings.openAIAPIKey, model: settings.openAIModel, baseURL: baseURL))
         llm = VVTRLLMPipeline(client: client, onResult: { [weak self] kind, intent, outputText, json in
@@ -90,18 +132,26 @@ final class AppModel: ObservableObject {
             )
             self.outputs.append(out)
             VVTRDatabase.shared.insertOutput(out)
+            if kind == .summary {
+              self.summaryDraft = outputText
+              self.isSummaryEditorPresented = true
+            }
+            if kind == .summary {
+              self.summaryDraft = outputText
+              self.isSummaryEditorPresented = true
+            }
           }
         })
 
         let llmPipeline = llm
-        asr = VVTRASRPipeline(client: client, onTranscript: { [weak self] lang, text, raw in
-          guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        asr = VVTRASRPipeline(provider: .openai(client), onTranscript: { [weak self] lang, text, raw in
           Task { @MainActor in
             guard let self else { return }
+            if let raw, self.handleASRErrorIfNeeded(raw: raw, sessionId: sessionId) { return }
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             let isZh = VVTRTextHeuristics.looksLikeChinese(text) || (lang?.lowercased().hasPrefix("zh") ?? false)
             let isQ = VVTRTextHeuristics.looksLikeQuestion(text)
             let intent: VVTRIntent = isQ ? .question : .statement
-            let kind: VVTROutputKind = isQ ? .answer : (isZh ? .summary : .translation)
 
             let seg = VVTRTranscriptSegment(
               sessionId: sessionId,
@@ -111,44 +161,120 @@ final class AppModel: ObservableObject {
             )
             self.segments.append(seg)
             VVTRDatabase.shared.insertSegment(seg)
-            let out = VVTROutput(
-              sessionId: sessionId,
-              segmentId: seg.id,
-              kind: kind,
-              sourceLanguage: lang,
-              intent: intent,
-              sourceText: self.settings.privacyMode == .storeNoAudioText ? "" : text,
-              outputText: "已转写：\(text)",
-              jsonPayload: (self.settings.privacyMode == .storeNoRawJSON ? nil : raw)
-            )
-            self.outputs.append(out)
-            VVTRDatabase.shared.insertOutput(out)
 
-            // Kick off LLM work
-            Task { [llmPipeline] in
-              if let llmPipeline {
-                await llmPipeline.handle(text: text, isChinese: isZh, intent: intent)
+            if isZh {
+              let out = VVTROutput(
+                sessionId: sessionId,
+                segmentId: seg.id,
+                kind: .translation,
+                sourceLanguage: lang,
+                intent: intent,
+                sourceText: self.settings.privacyMode == .storeNoAudioText ? "" : text,
+                outputText: text,
+                jsonPayload: self.settings.privacyMode == .storeNoRawJSON ? nil : raw
+              )
+              self.outputs.append(out)
+              VVTRDatabase.shared.insertOutput(out)
+            }
+
+            if !isZh && intent == .statement {
+              Task { [llmPipeline] in
+                if let llmPipeline {
+                  await llmPipeline.handle(text: text, isChinese: isZh, intent: intent)
+                }
               }
             }
           }
         })
-      } else {
+      case .gemini:
+        guard !settings.geminiAPIKey.isEmpty else { break }
+        let baseURL = URL(string: settings.geminiBaseURL) ?? URL(string: "https://generativelanguage.googleapis.com/v1beta")!
+        let g = VVTRGeminiClient(config: .init(apiKey: settings.geminiAPIKey, model: settings.geminiModel, baseURL: baseURL))
+
+        llm = VVTRLLMPipelineGemini(client: g, onResult: { [weak self] kind, intent, outputText, json in
+          Task { @MainActor in
+            guard let self else { return }
+            let out = VVTROutput(
+              sessionId: sessionId,
+              kind: kind,
+              intent: intent,
+              sourceText: "",
+              outputText: outputText,
+              jsonPayload: self.settings.privacyMode == .storeNoRawJSON ? nil : json
+            )
+            self.outputs.append(out)
+            VVTRDatabase.shared.insertOutput(out)
+          }
+        })
+        let llmPipeline = llm
+
+        asr = VVTRASRPipeline(provider: .gemini(g), onTranscript: { [weak self] lang, text, raw in
+          Task { @MainActor in
+            guard let self else { return }
+            if let raw, self.handleASRErrorIfNeeded(raw: raw, sessionId: sessionId) { return }
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            let isZh = VVTRTextHeuristics.looksLikeChinese(text) || (lang?.lowercased().hasPrefix("zh") ?? false)
+            let isQ = VVTRTextHeuristics.looksLikeQuestion(text)
+            let intent: VVTRIntent = isQ ? .question : .statement
+
+            let seg = VVTRTranscriptSegment(
+              sessionId: sessionId,
+              source: .mixed,
+              language: lang,
+              text: self.settings.privacyMode == .storeNoAudioText ? "" : text
+            )
+            self.segments.append(seg)
+            VVTRDatabase.shared.insertSegment(seg)
+
+            if isZh {
+              let out = VVTROutput(
+                sessionId: sessionId,
+                segmentId: seg.id,
+                kind: .translation,
+                sourceLanguage: lang,
+                intent: intent,
+                sourceText: self.settings.privacyMode == .storeNoAudioText ? "" : text,
+                outputText: text,
+                jsonPayload: self.settings.privacyMode == .storeNoRawJSON ? nil : raw
+              )
+              self.outputs.append(out)
+              VVTRDatabase.shared.insertOutput(out)
+            }
+
+            if !isZh && intent == .statement {
+              Task { [llmPipeline] in
+                if let llmPipeline {
+                  await llmPipeline.handle(text: text, isChinese: isZh, intent: intent)
+                }
+              }
+            }
+          }
+        })
+      }
+
+      if asr == nil || llm == nil {
         asr = nil
         llm = nil
+        outputs.append(
+          VVTROutput(
+            sessionId: sessionId,
+            kind: .summary,
+            intent: .statement,
+            sourceText: "",
+            outputText: "未配置云端 Key：请到“设置”选择 Provider 并填写对应 API Key。",
+            jsonPayload: nil
+          )
+        )
       }
 
       let asrPipeline = asr
 
       let sysChunker = VVTRChunker(config: chunkConfig, onChunk: { chunk in
-        let msg = "已切片（系统音频）：\(chunk.pcmData.count) bytes @ \(Int(chunk.sampleRate))Hz ch\(chunk.channels)"
-        appendInfo(msg)
         Task { [asrPipeline] in
           if let asrPipeline { await asrPipeline.process(chunk: chunk) }
         }
       })
       let micChunker = VVTRChunker(config: chunkConfig, onChunk: { chunk in
-        let msg = "已切片（麦克风）：\(chunk.pcmData.count) bytes @ \(Int(chunk.sampleRate))Hz ch\(chunk.channels)"
-        appendInfo(msg)
         Task { [asrPipeline] in
           if let asrPipeline { await asrPipeline.process(chunk: chunk) }
         }
@@ -158,7 +284,16 @@ final class AppModel: ObservableObject {
       self.micChunker = micChunker
 
       Task {
-        let micGranted = await VVTRPermissions.requestMicrophoneAccess()
+        let micGranted: Bool
+        switch VVTRPermissions.microphoneAuthorizationState() {
+        case .authorized:
+          micGranted = true
+        case .notDetermined:
+          micGranted = await VVTRPermissions.requestMicrophoneAccess()
+        case .denied, .restricted:
+          micGranted = false
+        }
+
         if !micGranted {
           await MainActor.run {
             self.isCapturing = false
@@ -169,7 +304,7 @@ final class AppModel: ObservableObject {
                 kind: .summary,
                 intent: .statement,
                 sourceText: "",
-                outputText: "未获得麦克风权限：请在系统设置中允许后重试。"
+                outputText: "麦克风权限未开启。应用会先检查当前授权状态；如果你之前已拒绝，请到系统设置中手动允许后重试。"
               )
             )
           }
@@ -178,7 +313,10 @@ final class AppModel: ObservableObject {
         // Start capture; ingest buffers into chunkers.
         let mgr = VVTRAudioCaptureManager(callbacks: .init(
           onSystemPCMBuffer: { [weak self] buf, at in
-            Task { @MainActor in self?.lastSystemAudioAt = at }
+            Task { @MainActor in
+              self?.lastSystemAudioAt = at
+              self?.systemAudioStatusMessage = nil
+            }
             if let pcm = VVTRPCM.interleavedInt16Data(from: buf) {
               Task { await sysChunker.ingestInterleavedInt16PCM(pcm.data, sampleRate: pcm.sampleRate, channels: pcm.channels, source: "system") }
             }
@@ -187,6 +325,11 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.lastMicAudioAt = at }
             if let pcm = VVTRPCM.interleavedInt16Data(from: buf) {
               Task { await micChunker.ingestInterleavedInt16PCM(pcm.data, sampleRate: pcm.sampleRate, channels: pcm.channels, source: "mic") }
+            }
+          },
+          onWarning: { [weak self] err in
+            Task { @MainActor in
+              self?.systemAudioStatusMessage = "系统音频不可用"
             }
           },
           onError: { [weak self] err in
@@ -215,13 +358,78 @@ final class AppModel: ObservableObject {
   }
 
   func stopCapture() {
-    capture?.stop()
-    capture = nil
-    isCapturing = false
-    systemChunker = nil
-    micChunker = nil
-    asr = nil
+    stopCaptureIfNeeded()
+
+    let transcript = segments
+      .map(\.text)
+      .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+      .joined(separator: "\n")
+
+    if let sessionId = currentSession?.id, let llmPipeline = makeLLMPipeline(sessionId: sessionId) {
+      Task { @MainActor in
+        await llmPipeline.summarizeSession(transcript: transcript)
+      }
+    }
+
     llm = nil
+  }
+
+  func exportCurrentSessionSummaryPDF() {
+    guard let session = currentSession else { return }
+    let summary = summaryDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !summary.isEmpty else {
+      outputs.append(
+        VVTROutput(
+          sessionId: session.id,
+          kind: .summary,
+          intent: .statement,
+          sourceText: "",
+          outputText: "还没有可导出的会议总结，请先停止采集并生成总结。"
+        )
+      )
+      return
+    }
+
+    let panel = NSSavePanel()
+    panel.allowedContentTypes = [.pdf]
+    panel.nameFieldStringValue = "\(sanitizedFileName(session.title))-summary.pdf"
+
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+
+    do {
+      let pdfData = makeSummaryPDFData(session: session, summary: summary)
+      try pdfData.write(to: url)
+    } catch {
+      outputs.append(
+        VVTROutput(
+          sessionId: session.id,
+          kind: .summary,
+          intent: .statement,
+          sourceText: "",
+          outputText: "导出 PDF 失败：\(error.localizedDescription)"
+        )
+      )
+    }
+  }
+
+  func saveEditedSummary() {
+    guard let sessionId = currentSession?.id else { return }
+    let content = summaryDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !content.isEmpty else { return }
+
+    if let index = outputs.lastIndex(where: { $0.kind == .summary }) {
+      outputs[index].outputText = content
+    }
+
+    let saved = VVTROutput(
+      sessionId: sessionId,
+      kind: .summary,
+      intent: .statement,
+      sourceText: "",
+      outputText: content
+    )
+    outputs.append(saved)
+    VVTRDatabase.shared.insertOutput(saved)
   }
 
   func appendMockData() {
@@ -246,10 +454,178 @@ final class AppModel: ObservableObject {
     )
   }
 
+  func isQuestionSegment(_ segment: VVTRTranscriptSegment) -> Bool {
+    VVTRTextHeuristics.looksLikeQuestion(segment.text)
+  }
+
+  func isQuestionSelected(_ segmentID: UUID) -> Bool {
+    selectedQuestionSegmentIDs.contains(segmentID)
+  }
+
+  func toggleQuestionSelection(_ segmentID: UUID) {
+    if selectedQuestionSegmentIDs.contains(segmentID) {
+      selectedQuestionSegmentIDs.remove(segmentID)
+    } else {
+      selectedQuestionSegmentIDs.insert(segmentID)
+    }
+  }
+
+  func answerSelectedQuestions() {
+    guard let sessionId = currentSession?.id else { return }
+    guard let llmPipeline = makeLLMPipeline(sessionId: sessionId) else {
+      outputs.append(
+        VVTROutput(
+          sessionId: sessionId,
+          kind: .answer,
+          intent: .question,
+          sourceText: "",
+          outputText: "未配置可用的云端问答模型，请先在设置中填写 API Key。"
+        )
+      )
+      return
+    }
+
+    let targets = segments.filter { selectedQuestionSegmentIDs.contains($0.id) && isQuestionSegment($0) }
+    guard !targets.isEmpty else { return }
+
+    for segment in targets {
+      let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      let isChinese = VVTRTextHeuristics.looksLikeChinese(text) || (segment.language?.lowercased().hasPrefix("zh") ?? false)
+      guard !text.isEmpty else { continue }
+      Task {
+        await llmPipeline.handle(text: text, isChinese: isChinese, intent: .question)
+      }
+    }
+
+    selectedQuestionSegmentIDs.subtract(targets.map(\.id))
+  }
+
+  private func stopCaptureIfNeeded() {
+    capture?.stop()
+    capture = nil
+    isCapturing = false
+    systemChunker = nil
+    micChunker = nil
+    asr = nil
+  }
+
+  private func makeSummaryPDFData(session: VVTRSession, summary: String) -> Data {
+    let titleFont = NSFont.boldSystemFont(ofSize: 22)
+    let bodyFont = NSFont.systemFont(ofSize: 13)
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.lineSpacing = 4
+
+    let content = NSMutableAttributedString(
+      string: "\(session.title)\n",
+      attributes: [
+        .font: titleFont,
+        .foregroundColor: NSColor.labelColor,
+      ]
+    )
+    content.append(NSAttributedString(
+      string: "生成时间：\(Date().formatted(date: .abbreviated, time: .shortened))\n\n",
+      attributes: [
+        .font: NSFont.systemFont(ofSize: 11),
+        .foregroundColor: NSColor.secondaryLabelColor,
+      ]
+    ))
+    content.append(NSAttributedString(
+      string: summary,
+      attributes: [
+        .font: bodyFont,
+        .foregroundColor: NSColor.labelColor,
+        .paragraphStyle: paragraph,
+      ]
+    ))
+
+    let pageWidth: CGFloat = 595
+    let textWidth: CGFloat = 515
+    let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: textWidth, height: 842))
+    textView.textContainerInset = NSSize(width: 0, height: 0)
+    textView.isEditable = false
+    textView.isHorizontallyResizable = false
+    textView.isVerticallyResizable = true
+    textView.textContainer?.containerSize = NSSize(width: textWidth, height: .greatestFiniteMagnitude)
+    textView.textContainer?.widthTracksTextView = true
+    textView.textStorage?.setAttributedString(content)
+    textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+    let textHeight = (textView.layoutManager?.usedRect(for: textView.textContainer!).height ?? 0) + 40
+
+    let documentView = NSView(frame: NSRect(x: 0, y: 0, width: pageWidth, height: max(842, textHeight + 80)))
+    textView.frame = NSRect(x: 40, y: 40, width: textWidth, height: max(762, textHeight))
+    documentView.addSubview(textView)
+    return documentView.dataWithPDF(inside: documentView.bounds)
+  }
+
+  private func sanitizedFileName(_ value: String) -> String {
+    let invalid = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+    let cleaned = value.components(separatedBy: invalid).joined(separator: "-")
+    return cleaned.isEmpty ? "meeting" : cleaned
+  }
+
   private func defaultTitle() -> String {
     let df = DateFormatter()
     df.dateFormat = "yyyy-MM-dd HH:mm"
     return "会话 \(df.string(from: Date()))"
+  }
+
+  private func makeLLMPipeline(sessionId: UUID) -> (any VVTRLLMHandling)? {
+    switch settings.provider {
+    case .openai:
+      guard !settings.openAIAPIKey.isEmpty else { return nil }
+      let baseURL = URL(string: settings.openAIBaseURL) ?? URL(string: "https://api.openai.com/v1")!
+      let client = VVTROpenAIClient(config: .init(apiKey: settings.openAIAPIKey, model: settings.openAIModel, baseURL: baseURL))
+      return VVTRLLMPipeline(client: client, onResult: { [weak self] kind, intent, outputText, json in
+        Task { @MainActor in
+          guard let self else { return }
+          let out = VVTROutput(
+            sessionId: sessionId,
+            kind: kind,
+            intent: intent,
+            sourceText: "",
+            outputText: outputText,
+            jsonPayload: self.settings.privacyMode == .storeNoRawJSON ? nil : json
+          )
+          self.outputs.append(out)
+          VVTRDatabase.shared.insertOutput(out)
+        }
+      })
+    case .gemini:
+      guard !settings.geminiAPIKey.isEmpty else { return nil }
+      let baseURL = URL(string: settings.geminiBaseURL) ?? URL(string: "https://generativelanguage.googleapis.com/v1beta")!
+      let client = VVTRGeminiClient(config: .init(apiKey: settings.geminiAPIKey, model: settings.geminiModel, baseURL: baseURL))
+      return VVTRLLMPipelineGemini(client: client, onResult: { [weak self] kind, intent, outputText, json in
+        Task { @MainActor in
+          guard let self else { return }
+          let out = VVTROutput(
+            sessionId: sessionId,
+            kind: kind,
+            intent: intent,
+            sourceText: "",
+            outputText: outputText,
+            jsonPayload: self.settings.privacyMode == .storeNoRawJSON ? nil : json
+          )
+          self.outputs.append(out)
+          VVTRDatabase.shared.insertOutput(out)
+        }
+      })
+    }
+  }
+
+  private func handleASRErrorIfNeeded(raw: String, sessionId: UUID) -> Bool {
+    guard raw.hasPrefix(Self.asrErrorPrefix) else { return false }
+    let message = String(raw.dropFirst(Self.asrErrorPrefix.count))
+    outputs.append(
+      VVTROutput(
+        sessionId: sessionId,
+        kind: .summary,
+        intent: .statement,
+        sourceText: "",
+        outputText: "转写失败：\(message)",
+        jsonPayload: settings.privacyMode == .storeNoRawJSON ? nil : raw
+      )
+    )
+    return true
   }
 }
 

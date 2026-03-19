@@ -1,13 +1,13 @@
 import Foundation
 import VVTRCore
 
-public actor VVTRLLMPipeline {
+public actor VVTRLLMPipelineGemini {
   public typealias OnResult = @Sendable (_ kind: VVTROutputKind, _ intent: VVTRIntent, _ outputText: String, _ json: String) -> Void
 
-  private let client: VVTROpenAIClient
+  private let client: VVTRGeminiClient
   private let onResult: OnResult
 
-  public init(client: VVTROpenAIClient, onResult: @escaping OnResult) {
+  public init(client: VVTRGeminiClient, onResult: @escaping OnResult) {
     self.client = client
     self.onResult = onResult
   }
@@ -15,12 +15,14 @@ public actor VVTRLLMPipeline {
   public func handle(text: String, isChinese: Bool, intent: VVTRIntent) async {
     do {
       if intent == .question {
-        let system = """
+        let prompt = """
 你是一个严谨的双语助理。用户给你的是一段语音转写文本，其中可能包含上下文噪声。请抽取明确的问题，先给出中文回答，再给出对应的英文翻译。
 输出必须是 JSON 对象：{ "type":"answer", "question":"...", "answer":"...", "english_answer":"...", "confidence":"low|med|high" }
+
+转写文本：
+\(text)
 """
-        let user = "转写文本：\n\(text)"
-        let json = try await client.chatJSON(system: system, user: user)
+        let json = try await client.generateJSON(prompt: prompt)
         let (q, a, en, conf) = parseAnswer(json: json)
         onResult(.answer, .question, "问题：\(q)\n中文回答：\(a)\nEnglish: \(en)\n置信度：\(conf)", json)
         return
@@ -28,17 +30,19 @@ public actor VVTRLLMPipeline {
 
       guard !isChinese else { return }
 
-      let system = """
+      let prompt = """
 你是一个翻译器。请把用户给出的文本翻译成中文，尽量忠实并保留专有名词。
 输出必须是 JSON 对象：{ "type":"translation", "source_lang":"auto", "target_lang":"zh", "source":"...", "translation":"..." }
+
+文本：
+\(text)
 """
-      let user = "文本：\n\(text)"
-      let json = try await client.chatJSON(system: system, user: user)
+      let json = try await client.generateJSON(prompt: prompt)
       let translation = parseTranslation(json: json)
       onResult(.translation, .statement, translation, json)
     } catch {
       let kind: VVTROutputKind = intent == .question ? .answer : .translation
-      onResult(kind, intent, "LLM 调用失败：\(error.localizedDescription)", "{\"error\":\"\(error.localizedDescription)\"}")
+      onResult(kind, intent, "Gemini 调用失败：\(error.localizedDescription)", "{\"error\":\"\(error.localizedDescription)\"}")
     }
   }
 
@@ -47,12 +51,14 @@ public actor VVTRLLMPipeline {
     guard !content.isEmpty else { return }
 
     do {
-      let system = """
+      let prompt = """
 你是一个中文会议总结器。请基于整场会议的转写内容输出中文总结。
 输出必须是 JSON 对象：{ "type":"summary", "lang":"zh", "text":"...", "bullets":[...], "key_points":[...] }
+
+整场会议转写：
+\(content)
 """
-      let user = "整场会议转写：\n\(content)"
-      let json = try await client.chatJSON(system: system, user: user)
+      let json = try await client.generateJSON(prompt: prompt)
       let summary = parseSummary(json: json)
       onResult(.summary, .statement, summary, json)
     } catch {
@@ -96,5 +102,5 @@ public actor VVTRLLMPipeline {
   }
 }
 
-extension VVTRLLMPipeline: VVTRLLMHandling {}
+extension VVTRLLMPipelineGemini: VVTRLLMHandling {}
 
